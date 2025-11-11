@@ -14,6 +14,7 @@ find_package(adore_math REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(PROJ REQUIRED)
 find_package(Eigen3 REQUIRED)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
   add_compile_options(-O3)
 endif()
@@ -30,19 +31,36 @@ target_include_directories(${PROJECT_NAME}
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     ${OpenCV_INCLUDE_DIRS}
-    ${OpenDrive_INCLUDE_DIRS} 
+    ${OpenDrive_INCLUDE_DIRS}
 )
 
-# Link dependencies (PRIVATE visibility preferred)
+# Link dependencies (PUBLIC so downstream sees them)
 target_link_libraries(${PROJECT_NAME}
   PUBLIC
     OpenDrive::OpenDrive
     adore_math::adore_math
     PROJ::proj
     Eigen3::Eigen
+    # Add ${OpenCV_LIBS} here if you have compiled OpenCV dependencies.
 )
 
-# Export target to make find_package(adore_math) work in other packages
+# -------------------------------------------------------------------
+# Tests
+# -------------------------------------------------------------------
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  # Library under test, used in test/CMakeLists.txt
+  set(ADORE_TEST_LIB_TARGET ${PROJECT_NAME})
+
+  add_subdirectory(test)
+endif()
+
+# -------------------------------------------------------------------
+# Install & export
+# -------------------------------------------------------------------
+
+# Export target to make find_package(adore_map) work in other packages
 install(TARGETS ${PROJECT_NAME}
   EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
