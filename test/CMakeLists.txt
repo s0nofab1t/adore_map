@@ -23,5 +23,9 @@ foreach(test_src ${ADORE_MAP_TEST_SOURCES})
       PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../include
     )
+    target_compile_definitions(${test_name}
+    PRIVATE
+      ADORE_MAP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+  )
   endif()
 endforeach()
