@@ -18,7 +18,7 @@ namespace adore
 namespace map
 {
 Map
-MapLoader::load_from_file( const std::string& map_file_location, bool ignore_non_driving )
+MapLoader::load_from_file( const std::string& map_file_location, bool allow_lane_changes, bool ignore_non_driving )
 {
   // Extract file extension
   std::string::size_type dot_pos = map_file_location.find_last_of( '.' );
@@ -39,7 +39,7 @@ MapLoader::load_from_file( const std::string& map_file_location, bool ignore_non
 
   if( extension == "r2sr" )
   {
-    return load_from_r2s_file( map_file_location, ignore_non_driving );
+    return load_from_r2s_file( map_file_location, allow_lane_changes, ignore_non_driving );
   }
 
   throw std::invalid_argument( "Unsupported file extension: " + extension );
@@ -53,21 +53,21 @@ MapLoader::generate_lane_id()
 }
 
 Map
-MapLoader::load_from_r2s_file( const std::string& map_file_location, bool /*ignore_non_driving*/ )
+MapLoader::load_from_r2s_file( const std::string& map_file_location, bool allow_lane_changes, bool /*ignore_non_driving*/ )
 {
   Map map;
 
   auto border_data_r2sr = adore::r2s::load_border_data_from_r2sr_file( map_file_location );
   auto border_data_r2sl = adore::r2s::load_border_data_from_r2sl_file( map_file_location );
 
-  create_from_r2s( map, border_data_r2sr, border_data_r2sl );
+  create_from_r2s( map, border_data_r2sr, border_data_r2sl, allow_lane_changes );
 
   return map;
 }
 
 void
 MapLoader::create_from_r2s( Map& map, const std::vector<r2s::BorderDataR2SR>& standard_lines,
-                            const std::vector<r2s::BorderDataR2SL>& lane_boundaries )
+                            const std::vector<r2s::BorderDataR2SL>& lane_boundaries, bool allow_lane_changes )
 {
   set_quadtree_bounds( map, standard_lines, lane_boundaries );
 
@@ -106,6 +106,11 @@ MapLoader::create_from_r2s( Map& map, const std::vector<r2s::BorderDataR2SR>& st
   }
 
   map.lane_graph = infer_graph_from_proximity_of_lanes( map, LANE_CONNECTION_DIST );
+  if( allow_lane_changes )
+  {
+    constexpr double lane_change_penalty = 5.0;
+    add_parallel_connections_same_road( map, map.lane_graph, lane_change_penalty );
+  }
 }
 
 void
@@ -305,6 +310,50 @@ MapLoader::infer_graph_from_proximity_of_lanes( Map& map, double proximity_thres
   }
 
   return lane_graph;
+}
+
+void
+MapLoader::add_parallel_connections_same_road( Map& map, RoadGraph& lane_graph, double lane_change_penalty )
+{
+  // for each road, connect all lanes that
+  //   - belong to that road
+  //   - have the same driving direction (left_of_reference)
+  for( const auto& [road_id, road] : map.roads )
+  {
+    // copy set<shared_ptr<Lane>> to a vector for indexed iteration
+    std::vector<std::shared_ptr<Lane>> road_lanes( road.lanes.begin(), road.lanes.end() );
+    const std::size_t                  n = road_lanes.size();
+
+    for( std::size_t i = 0; i < n; ++i )
+    {
+      const auto& lane_i = road_lanes[i];
+      for( std::size_t j = 0; j < n; ++j )
+      {
+        if( i == j )
+          continue;
+
+        const auto& lane_j = road_lanes[j];
+
+        // only same direction on this road
+        if( lane_i->left_of_reference != lane_j->left_of_reference )
+          continue;
+
+        // if we already have SOME connection i->j, don’t override it
+        if( lane_graph.find_connection( lane_i->id, lane_j->id ).has_value() )
+          continue;
+
+        Connection conn;
+        conn.from_id         = lane_i->id;
+        conn.to_id           = lane_j->id;
+        conn.connection_type = PARALLEL;
+
+        // simple option: constant penalty per lane-change
+        conn.weight = lane_change_penalty;
+
+        lane_graph.add_connection( conn );
+      }
+    }
+  }
 }
 
 std::pair<double, ConnectionType>

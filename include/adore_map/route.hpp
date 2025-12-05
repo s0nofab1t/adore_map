@@ -45,12 +45,11 @@ struct Route
 {
   Route() {};
   std::unordered_map<size_t, std::shared_ptr<RouteSection>> lane_to_sections;
-  std::map<double, std::shared_ptr<RouteSection>>           s_to_sections;
   std::deque<std::shared_ptr<RouteSection>>                 sections;
   std::shared_ptr<Map>                                      map;
   adore::math::Point2d                                      start;
   adore::math::Point2d                                      destination;
-  std::map<double, MapPoint>                                center_lane;
+  std::map<double, MapPoint>                                reference_line;
 
   double               get_length() const;
   void                 add_route_section( Border& points, const MapPoint& start_point, const MapPoint& end_point, bool reverse );
@@ -58,7 +57,7 @@ struct Route
   MapPoint             get_map_point_at_s( double distance ) const;
   math::Pose2d         get_pose_at_s( double distance ) const;
   double               get_curvature_at_s( double s ) const;
-  void                 initialize_center_lane();
+  void                 initialize_reference_line();
 
   template<typename StartPoint, typename EndPoint>
   Route( const StartPoint& start_point, const EndPoint& end, const std::shared_ptr<Map>& reference_map );
@@ -105,7 +104,7 @@ Route::Route( const StartPoint& start_point, const EndPoint& end, const std::sha
       add_route_section( lane->borders.center, *nearest_start_point, *nearest_end_point, lane->left_of_reference );
     }
 
-    initialize_center_lane();
+    initialize_reference_line();
   }
 }
 
@@ -148,14 +147,14 @@ Route::interpolate_at_s( double distance ) const
   TPoint result;
 
   // Early exit for empty or single-point lanes
-  if( center_lane.empty() )
+  if( reference_line.empty() )
   {
     return result;
   }
 
-  if( center_lane.size() == 1 )
+  if( reference_line.size() == 1 )
   {
-    const auto& sp = center_lane.begin()->second;
+    const auto& sp = reference_line.begin()->second;
     result.x       = sp.x;
     result.y       = sp.y;
 
@@ -168,18 +167,18 @@ Route::interpolate_at_s( double distance ) const
   }
 
   // Interpolation logic
-  auto upper_it = center_lane.lower_bound( distance );
+  auto upper_it = reference_line.lower_bound( distance );
   auto lower_it = upper_it;
 
   double frac = 0.0;
 
-  if( upper_it == center_lane.end() )
+  if( upper_it == reference_line.end() )
   {
     upper_it--;
     lower_it = std::prev( upper_it );
     frac     = 1.0;
   }
-  else if( upper_it == center_lane.begin() )
+  else if( upper_it == reference_line.begin() )
   {
     upper_it++;
     frac = 0.0;
@@ -219,15 +218,15 @@ Route::interpolate_at_s( double distance ) const
                   result.max_speed;
                 } )
   {
-    auto upper_it = center_lane.lower_bound( distance );
+    auto upper_it = reference_line.lower_bound( distance );
     auto lower_it = upper_it;
 
-    if( upper_it == center_lane.end() )
+    if( upper_it == reference_line.end() )
     {
       upper_it--;
       lower_it = std::prev( upper_it );
     }
-    else if( upper_it == center_lane.begin() )
+    else if( upper_it == reference_line.begin() )
     {
       lower_it = upper_it;
     }
@@ -275,7 +274,7 @@ get_default_route( const PoseT& start_pose, double max_length, const std::shared
     current_lane_id = *lane_ids.begin(); // just take first connecting lane
   }
 
-  route.initialize_center_lane();
+  route.initialize_reference_line();
 
   return route;
 }
@@ -288,21 +287,21 @@ double
 Route::refine_s_with_arc( const PLike& pos, double coarse_s ) const
 {
   /* 0.  need at least three samples                                    */
-  if( center_lane.size() < 3 )
+  if( reference_line.size() < 3 )
     return coarse_s;
 
   /* 1.  locate the nearest MapPoint on the 1-m centre-lane grid        */
-  auto it_hi   = center_lane.lower_bound( coarse_s );
-  auto nearest = ( it_hi == center_lane.end() )                                                             ? std::prev( it_hi )
-               : ( it_hi == center_lane.begin() )                                                           ? it_hi
+  auto it_hi   = reference_line.lower_bound( coarse_s );
+  auto nearest = ( it_hi == reference_line.end() )                                                          ? std::prev( it_hi )
+               : ( it_hi == reference_line.begin() )                                                        ? it_hi
                : ( std::abs( coarse_s - std::prev( it_hi )->first ) < std::abs( coarse_s - it_hi->first ) ) ? std::prev( it_hi )
                                                                                                             : it_hi;
 
-  if( nearest == center_lane.begin() )
+  if( nearest == reference_line.begin() )
     return coarse_s; // no p_prev
   auto it_prev = std::prev( nearest );
   auto it_next = std::next( nearest );
-  if( it_next == center_lane.end() )
+  if( it_next == reference_line.end() )
     return coarse_s; // no p_next
 
   const MapPoint& p0 = it_prev->second;

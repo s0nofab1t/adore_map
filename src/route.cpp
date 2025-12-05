@@ -19,14 +19,15 @@ namespace map
 {
 
 void
-Route::add_route_section( Border& lane_to_add, const MapPoint& start_point, const MapPoint& end_point, bool reverse = false )
-
+Route::add_route_section( Border& lane_to_add, const MapPoint& start_point, const MapPoint& end_point, bool reverse /* = false */ )
 {
   if( lane_to_add.interpolated_points.empty() )
     return;
-  std::shared_ptr<RouteSection> next = std::make_shared<RouteSection>();
-  next->lane_id                      = lane_to_add.interpolated_points[0].parent_id;
 
+  auto next     = std::make_shared<RouteSection>();
+  next->lane_id = lane_to_add.interpolated_points[0].parent_id;
+
+  // 1) default lane-local interval: full lane, with direction
   if( reverse )
   {
     next->end_s   = lane_to_add.interpolated_points.front().s;
@@ -37,10 +38,30 @@ Route::add_route_section( Border& lane_to_add, const MapPoint& start_point, cons
     next->start_s = lane_to_add.interpolated_points.front().s;
     next->end_s   = lane_to_add.interpolated_points.back().s;
   }
+
+  // 2) crop by actual route start / end if this lane contains them
   if( start_point.parent_id == next->lane_id )
     next->start_s = start_point.s;
   if( end_point.parent_id == next->lane_id )
     next->end_s = end_point.s;
+
+  // 3) lane-change case: if previous section exists and we’re switching lanes
+  //    via a PARALLEL connection, align the new lane's start_s with the
+  //    previous lane's "exit s" so we don't go back to s=0 of the lane.
+  if( !sections.empty() && map )
+  {
+    const auto& prev = sections.back();
+    if( prev && prev->lane_id != next->lane_id )
+    {
+      auto conn_opt = map->lane_graph.find_connection( prev->lane_id, next->lane_id );
+      if( conn_opt && conn_opt->connection_type == PARALLEL )
+      {
+        // We leave the previous lane at prev->end_s (regardless of direction),
+        // so start the new lane at the same longitudinal s along the road.
+        next->start_s = prev->end_s;
+      }
+    }
+  }
 
   lane_to_sections[next->lane_id] = next;
   sections.push_back( next );
@@ -49,13 +70,13 @@ Route::add_route_section( Border& lane_to_add, const MapPoint& start_point, cons
 double
 Route::get_length() const
 {
-  if( center_lane.empty() )
+  if( reference_line.empty() )
   {
     return 0.0;
   }
-  auto center_lane_iter = center_lane.end();
-  center_lane_iter--;
-  return center_lane_iter->first;
+  auto reference_line_iter = reference_line.end();
+  reference_line_iter--;
+  return reference_line_iter->first;
 }
 
 std::deque<MapPoint>
@@ -63,13 +84,13 @@ Route::get_shortened_route( double start_s, double desired_length ) const
 {
   std::deque<MapPoint> result;
 
-  auto center_lane_iter = center_lane.lower_bound( start_s );
-  auto upper_bound      = center_lane.upper_bound( start_s + desired_length );
+  auto reference_line_iter = reference_line.lower_bound( start_s );
+  auto upper_bound         = reference_line.upper_bound( start_s + desired_length );
 
-  while( center_lane_iter != center_lane.end() && center_lane_iter != upper_bound )
+  while( reference_line_iter != reference_line.end() && reference_line_iter != upper_bound )
   {
-    result.push_back( center_lane_iter->second );
-    center_lane_iter++;
+    result.push_back( reference_line_iter->second );
+    reference_line_iter++;
   }
   return result;
 }
@@ -100,57 +121,79 @@ Route::get_curvature_at_s( double s ) const
 }
 
 void
-Route::initialize_center_lane()
+Route::initialize_reference_line()
 {
-  center_lane.clear();
+  reference_line.clear();
   if( !map )
   {
     return;
   }
 
-  double s = 0.0;
+  double route_s_accum = 0.0;
 
-  // Go through each RouteSection, gather center points from that lane in [start_s, end_s]
   for( auto& section : sections )
   {
-
-    section->route_s = s;
-    s_to_sections[s] = section;
-
+    // 1) find lane
     auto lane_it = map->lanes.find( section->lane_id );
     if( lane_it == map->lanes.end() )
       continue;
 
-    std::shared_ptr<Lane> lane_ptr = lane_it->second;
-    if( !lane_ptr )
+    const auto& lane    = *lane_it->second;
+    const auto& cpoints = lane.borders.center.interpolated_points;
+    if( cpoints.empty() )
       continue;
 
-    const auto& cpoints = lane_ptr->borders.center.interpolated_points;
-    bool        reverse = section->end_s < section->start_s;
-    double      start_s = reverse ? section->end_s : section->start_s;
-    double      end_s   = reverse ? section->start_s : section->end_s;
+    // 2) lane-local interval and direction
+    const bool   reverse     = ( section->end_s < section->start_s );
+    const double lane_s_min  = std::min( section->start_s, section->end_s );
+    const double lane_s_max  = std::max( section->start_s, section->end_s );
+    const double section_len = lane_s_max - lane_s_min;
 
-    for( size_t i = 0; i < cpoints.size(); ++i )
+    if( section_len <= 0.0 )
+      continue;
+
+    // global start s for this section
+    section->route_s = route_s_accum;
+
+    // 3) iterate over lane center points in correct direction,
+    //    but only within [lane_s_min, lane_s_max]
+    if( !reverse )
     {
-      auto point = cpoints[reverse ? cpoints.size() - i - 1 : i];
-      // If reversed, local_s should go 0...seg_length in the same direction
-      double local_s = reverse ? ( end_s - point.s ) : ( point.s - start_s );
-      if( point.s >= start_s && point.s <= end_s )
+      for( const auto& pt : cpoints )
       {
-        center_lane[s + local_s] = point;
+        if( pt.s < lane_s_min || pt.s > lane_s_max )
+          continue;
+
+        const double local_s  = pt.s - lane_s_min; // 0 .. section_len
+        const double ref_s    = route_s_accum + local_s;
+        reference_line[ref_s] = pt;
       }
     }
-    s = get_length();
+    else
+    {
+      for( auto it = cpoints.rbegin(); it != cpoints.rend(); ++it )
+      {
+        const auto& pt = *it;
+        if( pt.s < lane_s_min || pt.s > lane_s_max )
+          continue;
+
+        const double local_s  = lane_s_max - pt.s; // 0 .. section_len
+        const double ref_s    = route_s_accum + local_s;
+        reference_line[ref_s] = pt;
+      }
+    }
+
+    // 4) advance global route s by the *used* part of this lane
+    route_s_accum += section_len;
   }
 
-  // filter points that are too close to each other
-  // loop over center_lane keys and remove points that are too close in s
-  for( auto it = center_lane.begin(); it != center_lane.end(); )
+  // 5) optional thinning in s
+  for( auto it = reference_line.begin(); it != reference_line.end(); )
   {
     auto next_it = std::next( it );
-    if( next_it != center_lane.end() && std::fabs( next_it->first - it->first ) < 0.5 )
+    if( next_it != reference_line.end() && std::fabs( next_it->first - it->first ) < 0.5 )
     {
-      center_lane.erase( it );
+      reference_line.erase( it );
       it = next_it;
     }
     else
@@ -159,6 +202,7 @@ Route::initialize_center_lane()
     }
   }
 }
+
 
 } // namespace map
 } // namespace adore
