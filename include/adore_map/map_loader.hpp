@@ -40,17 +40,17 @@ class MapLoader
 public:
 
   // Static method to load a Map from an R2S file
-  static Map load_from_r2s_file( const std::string& map_file_location, bool ignore_non_driving = false );
+  static Map load_from_r2s_file( const std::string& map_file_location, bool allow_lane_changes = true, bool ignore_non_driving = false );
 
   static Map load_from_xodr_file( const std::string& map_file_location, bool ignore_non_driving = false );
 
-  static Map load_from_file( const std::string& map_file_location, bool ignore_non_driving = false );
+  static Map load_from_file( const std::string& map_file_location, bool allow_lane_changes = true, bool ignore_non_driving = false );
 
 
 private:
 
   static void create_from_r2s( Map& map, const std::vector<r2s::BorderDataR2SR>& standard_lines,
-                               const std::vector<r2s::BorderDataR2SL>& lane_boundaries );
+                               const std::vector<r2s::BorderDataR2SL>& lane_boundaries, bool allow_lane_changes );
 
   static Border create_reference_line( const adore::r2s::BorderDataR2SR& r2s_ref_line );
 
@@ -79,6 +79,7 @@ private:
   constexpr static double MIN_LANE_LENGTH      = 0.5;
 
   static RoadGraph                         infer_graph_from_proximity_of_lanes( Map& map, double proximity );
+  static void                              add_parallel_connections_same_road( Map& map, RoadGraph& graph, double lane_change_penalty );
   static std::pair<double, ConnectionType> calculate_lane_distance( const Lane& from_lane, const Lane& to_lane );
 
   static std::pair<Border, Border> xodr_mesh_to_borders( const odr::Mesh3D& mesh, size_t lane_id, double s0 );
